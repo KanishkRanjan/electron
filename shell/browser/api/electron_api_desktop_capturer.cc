@@ -43,7 +43,7 @@
 
 #if BUILDFLAG(IS_MAC)
 #include "base/strings/string_number_conversions.h"
-#include "shell/browser/ui/window_icon_utils.h" // fix low-resolution app icon issue
+#include "shell/browser/ui/window_icon_utils.h"  // fixes low-resolution app icon issue
 #include "ui/base/cocoa/permissions_utils.h"
 #else
 #include "chrome/browser/media/webrtc/window_icon_util.h"
