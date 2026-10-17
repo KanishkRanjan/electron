@@ -3,10 +3,26 @@ import { BrowserWindow, session, desktopCapturer } from 'electron/main';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import * as http from 'node:http';
+import * as os from 'node:os';
 
 import { captureWithTabSourceId } from './lib/media-helpers.ts';
 import { ifit, listen, waitUntil } from './lib/spec-helpers.ts';
 import { closeAllWindows } from './lib/window-helpers.ts';
+
+// macOS 14.2+ captures system loopback audio with the Core Audio Tap API.
+const isMacOS14_2OrLater = () => {
+  if (process.platform !== 'darwin') return false;
+  const [major, minor = 0] = process.getSystemVersion().split('.').map(Number);
+  return major > 14 || (major === 14 && minor >= 2);
+};
+const isWindows11OrLater = () => {
+  if (process.platform !== 'win32') return false;
+  const [major, , build] = os.release().split('.').map(Number);
+  return major > 10 || (major === 10 && build >= 22000);
+};
+// Mirrors media::IsRestrictOwnAudioSupported(): Chromium only honors the
+// restrictOwnAudio constraint on macOS 14.2+ and Windows 11+.
+const isRestrictOwnAudioSupported = () => isMacOS14_2OrLater() || isWindows11OrLater();
 
 describe('setDisplayMediaRequestHandler', () => {
   afterEach(closeAllWindows);
@@ -63,8 +79,8 @@ describe('setDisplayMediaRequestHandler', () => {
   });
 
   // Process-level loopback audio capture (restrictOwnAudio / loopbackWithoutChrome)
-  // is not supported on Linux audio backends (PulseAudio / PipeWire).
-  ifit(process.platform !== 'linux')(
+  // is only supported on macOS 14.2+ and Windows 11+.
+  ifit(isRestrictOwnAudioSupported())(
     'honors the restrictOwnAudio constraint when granted loopback audio',
     async (ctx) => {
       if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) {
@@ -107,6 +123,119 @@ describe('setDisplayMediaRequestHandler', () => {
       expect(restrictOwnAudioSetting).toBe(true);
     }
   );
+
+  // Grants `video` plus `audio` to a getDisplayMedia() call with the given
+  // audio constraints, and returns the settings of the granted audio track.
+  async function getGrantedAudioSettings (
+    grant: (w: BrowserWindow, sources: Electron.DesktopCapturerSource[]) => Electron.Streams,
+    audioConstraints: { restrictOwnAudio?: boolean; suppressLocalAudioPlayback?: boolean }
+  ) {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const ses = session.fromPartition('' + Math.random());
+    const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
+    let requestHandlerCalled = false;
+    ses.setDisplayMediaRequestHandler((request, callback) => {
+      requestHandlerCalled = true;
+      callback(grant(w, sources));
+    });
+    await w.loadURL(serverUrl);
+    const result = await w.webContents.executeJavaScript(
+      `
+      navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: ${JSON.stringify(audioConstraints)},
+      }).then(stream => {
+        const audioTracks = stream.getAudioTracks();
+        const settings = audioTracks[0]?.getSettings();
+        return {
+          ok: stream instanceof MediaStream,
+          message: null,
+          audioTrackCount: audioTracks.length,
+          deviceId: settings?.deviceId ?? null,
+          suppressLocalAudioPlayback: settings?.suppressLocalAudioPlayback ?? null
+        };
+      }, e => ({ ok: false, message: e.message, audioTrackCount: 0, deviceId: null, suppressLocalAudioPlayback: null }))
+    `,
+      true
+    );
+    return { requestHandlerCalled, ...result };
+  }
+
+  // System loopback audio capture is not supported on Linux test machines, or
+  // on macOS before the Core Audio Tap API.
+  ifit(process.platform === 'win32' || isMacOS14_2OrLater())(
+    'honors the suppressLocalAudioPlayback constraint when granted loopback audio',
+    async (ctx) => {
+      if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) {
+        return ctx.skip();
+      }
+      const { requestHandlerCalled, ok, message, audioTrackCount, deviceId, suppressLocalAudioPlayback } =
+        await getGrantedAudioSettings((w, sources) => ({ video: sources[0], audio: 'loopback' }), {
+          suppressLocalAudioPlayback: true
+        });
+      expect(requestHandlerCalled).toBe(true);
+      expect(ok, message).toBe(true);
+      expect(audioTrackCount).toBe(1);
+      expect(deviceId).toBe('loopbackWithMute');
+      expect(suppressLocalAudioPlayback).toBe(true);
+    }
+  );
+
+  ifit(isRestrictOwnAudioSupported())(
+    'gives restrictOwnAudio precedence over suppressLocalAudioPlayback',
+    async (ctx) => {
+      if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) {
+        return ctx.skip();
+      }
+      const { requestHandlerCalled, ok, message, audioTrackCount, deviceId } = await getGrantedAudioSettings(
+        (w, sources) => ({ video: sources[0], audio: 'loopback' }),
+        { restrictOwnAudio: true, suppressLocalAudioPlayback: true }
+      );
+      expect(requestHandlerCalled).toBe(true);
+      expect(ok, message).toBe(true);
+      expect(audioTrackCount).toBe(1);
+      expect(deviceId).toBe('loopbackWithoutChrome');
+    }
+  );
+
+  ifit(isRestrictOwnAudioSupported())(
+    'honors the restrictOwnAudio constraint when granted loopbackWithMute audio',
+    async (ctx) => {
+      if ((await desktopCapturer.getSources({ types: ['screen'] })).length === 0) {
+        return ctx.skip();
+      }
+      const { requestHandlerCalled, ok, message, audioTrackCount, deviceId } = await getGrantedAudioSettings(
+        (w, sources) => ({ video: sources[0], audio: 'loopbackWithMute' }),
+        { restrictOwnAudio: true }
+      );
+      expect(requestHandlerCalled).toBe(true);
+      expect(ok, message).toBe(true);
+      expect(audioTrackCount).toBe(1);
+      expect(deviceId).toBe('loopbackWithoutChrome');
+    }
+  );
+
+  it('keeps local playback of tab audio when enableLocalEcho is set', async () => {
+    const { requestHandlerCalled, ok, message, audioTrackCount, deviceId } = await getGrantedAudioSettings(
+      (w) => ({ video: w.webContents.mainFrame, audio: w.webContents.mainFrame, enableLocalEcho: true }),
+      {}
+    );
+    expect(requestHandlerCalled).toBe(true);
+    expect(ok, message).toBe(true);
+    expect(audioTrackCount).toBe(1);
+    expect(deviceId).toMatch(/^web-contents-media-stream:\/\/\d+:\d+$/);
+  });
+
+  it('mutes local playback of tab audio when suppressLocalAudioPlayback is requested', async () => {
+    const { requestHandlerCalled, ok, message, audioTrackCount, deviceId } = await getGrantedAudioSettings(
+      (w) => ({ video: w.webContents.mainFrame, audio: w.webContents.mainFrame, enableLocalEcho: true }),
+      { suppressLocalAudioPlayback: true }
+    );
+    expect(requestHandlerCalled).toBe(true);
+    expect(ok, message).toBe(true);
+    expect(audioTrackCount).toBe(1);
+    expect(deviceId).toMatch(/^web-contents-media-stream:\/\/\d+:\d+\?local_echo=false$/);
+  });
 
   it('does not crash when using a bogus ID', async () => {
     const ses = session.fromPartition('' + Math.random());

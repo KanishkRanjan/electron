@@ -1227,12 +1227,18 @@ session.fromPartition('some-partition').setPermissionCheckHandler((webContents, 
       * `audio` String | [WebFrameMain](web-frame-main.md) (optional) - If
         a string is specified, can be `loopback` or `loopbackWithMute`.
         Specifying a loopback device will capture system audio, and is
-        currently only supported on Windows. If a WebFrameMain is specified,
-        will capture audio from the `webContents` that contains that frame.
+        currently only supported on Windows and macOS 13+ (see the
+        [desktopCapturer](desktop-capturer.md) macOS caveats). If a
+        WebFrameMain is specified, will capture audio from the `webContents`
+        that contains that frame. If the page requested the
+        `restrictOwnAudio` constraint, a loopback device will exclude audio
+        played by the app on macOS 14.2+ and Windows 11+. Otherwise, if the
+        page requested the `suppressLocalAudioPlayback` constraint,
+        `loopback` will behave like `loopbackWithMute`.
       * `enableLocalEcho` Boolean (optional) - If `audio` is a [WebFrameMain](web-frame-main.md)
          and this is set to `true`, then local playback of audio will not be muted (e.g. using `MediaRecorder`
          to record `WebFrameMain` with this flag set to `true` will allow audio to pass through to the speakers
-         while recording). Default is `false`.
+         while recording). Ignored if the page requested the `suppressLocalAudioPlayback` constraint. Default is `false`.
 * `opts` Object (optional) _macOS_ _Experimental_
   * `useSystemPicker` Boolean - true if the available native system picker should be used. Default is `false`. _macOS_ _Experimental_
 

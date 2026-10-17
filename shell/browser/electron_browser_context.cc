@@ -853,22 +853,30 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
       }
       const bool enable_local_echo =
           result_dict.ValueOrDefault("enableLocalEcho", false);
+      // Like Chrome, the page's suppressLocalAudioPlayback constraint mutes
+      // local playback of the captured tab even when enableLocalEcho is set.
+      const bool disable_local_echo =
+          !enable_local_echo || request.suppress_local_audio_playback;
       blink::MediaStreamDevice audio_device(
-          request.audio_type,
-          tab_capture_id(rfh, /*disable_local_echo=*/!enable_local_echo),
+          request.audio_type, tab_capture_id(rfh, disable_local_echo),
           "Tab audio");
       audio_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
           capturer, capturer_origin,
           GetAudioDesktopMediaId(request.requested_audio_device_ids));
       devices.audio_device = audio_device;
     } else if (result_dict.Get("audio", &id)) {
-      if (request.restrict_own_audio &&
-          id == media::AudioDeviceDescription::kLoopbackInputDeviceId) {
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+      // Apply the page's audio constraints to system loopback audio with the
+      // same precedence as Chrome: restrictOwnAudio wins over
+      // suppressLocalAudioPlayback. Blink only sets restrict_own_audio on
+      // platforms that support kLoopbackWithoutChromeId.
+      const bool is_system_loopback =
+          id == media::AudioDeviceDescription::kLoopbackInputDeviceId ||
+          id == media::AudioDeviceDescription::kLoopbackWithMuteDeviceId;
+      if (is_system_loopback && request.restrict_own_audio) {
         id = media::AudioDeviceDescription::kLoopbackWithoutChromeId;
-#else
-        id = media::AudioDeviceDescription::kLoopbackInputDeviceId;
-#endif
+      } else if (id == media::AudioDeviceDescription::kLoopbackInputDeviceId &&
+                 request.suppress_local_audio_playback) {
+        id = media::AudioDeviceDescription::kLoopbackWithMuteDeviceId;
       }
       blink::MediaStreamDevice audio_device(request.audio_type, id,
                                             "System audio");
